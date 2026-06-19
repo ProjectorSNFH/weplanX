@@ -1,7 +1,20 @@
-import { Redis } from '@upstash/redis';
+import { createClient } from 'redis';
 
-// Vercel 환경 변수에 맞춰서 알아서 서버 주소를 가져옵니다.
-const kv = Redis.fromEnv();
+// 대시보드에서 확인한 URL을 직접 주입하여 클라이언트를 생성합니다.
+const client = createClient({
+    url: 'redis://default:8BXj7uC47lLbHXy3eMsdZ2TVcryJpszB@cinnamon-moral-retrosmart-79501.db.redis.io:10684'
+});
+
+// 서버가 켜질 때 Redis와 연결을 수립합니다. (연결 에러 방지)
+client.on('error', err => console.error('❌ Redis Client Error', err));
+let isConnected = false;
+
+async function connectRedis() {
+    if (!isConnected) {
+        await client.connect();
+        isConnected = true;
+    }
+}
 
 export default async function handler(req, res) {
     // 1. CORS 헤더 설정
@@ -22,11 +35,13 @@ export default async function handler(req, res) {
     const STORAGE_KEY = 'max_planner_global_payload';
 
     try {
+        // Redis 연결 확보
+        await connectRedis();
+
         // 📥 [GET 요청]: 데이터 불러오기
         if (req.method === 'GET') {
             console.log("▶ [서버] Redis로부터 데이터를 조회합니다.");
-            const savedPayload = await kv.get(STORAGE_KEY);
-            
+            const savedPayload = await client.get(STORAGE_KEY);
             return res.status(200).json({ payload: savedPayload || "" });
         } 
         
@@ -38,7 +53,7 @@ export default async function handler(req, res) {
             }
 
             // Redis에 데이터 저장
-            await kv.set(STORAGE_KEY, payload);
+            await client.set(STORAGE_KEY, payload);
             console.log("✅ [서버] Redis에 데이터 저장 성공!");
             return res.status(200).json({ success: true });
         }
