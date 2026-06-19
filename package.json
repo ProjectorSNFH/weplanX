@@ -1,8 +1,14 @@
 {
-  "name": "weplanx",
+  "name": "max-planner-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Max Planner Vercel KV Backend",
+  "main": "api/planner.js",
+  "dependencies": {
+    "@upstash/redis": "^1.28.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
