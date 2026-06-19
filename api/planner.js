@@ -1,23 +1,8 @@
-import { createClient } from 'redis';
-
-// 대시보드에서 확인한 URL을 직접 주입하여 클라이언트를 생성합니다.
-const client = createClient({
-    url: 'redis://default:8BXj7uC47lLbHXy3eMsdZ2TVcryJpszB@cinnamon-moral-retrosmart-79501.db.redis.io:10684'
-});
-
-// 서버가 켜질 때 Redis와 연결을 수립합니다. (연결 에러 방지)
-client.on('error', err => console.error('❌ Redis Client Error', err));
-let isConnected = false;
-
-async function connectRedis() {
-    if (!isConnected) {
-        await client.connect();
-        isConnected = true;
-    }
-}
+// 💡 서버가 켜져 있는 동안 데이터를 임시 저장할 RAM 공간 (글로벌 변수)
+let ramStorage = ""; 
 
 export default async function handler(req, res) {
-    // 1. CORS 헤더 설정
+    // 1. CORS 및 프리플라이트(OPTIONS) 완벽 방어 설정
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-App-Verification');
@@ -32,36 +17,28 @@ export default async function handler(req, res) {
         return res.status(401).json({ error: '인증되지 않은 요청입니다.' });
     }
 
-    const STORAGE_KEY = 'max_planner_global_payload';
-
     try {
-        // Redis 연결 확보
-        await connectRedis();
-
-        // 📥 [GET 요청]: 데이터 불러오기
+        // 📥 [GET 요청]: 프론트엔드가 데이터를 달라고 할 때 (Cloud Load)
         if (req.method === 'GET') {
-            console.log("▶ [서버] Redis로부터 데이터를 조회합니다.");
-            const savedPayload = await client.get(STORAGE_KEY);
-            return res.status(200).json({ payload: savedPayload || "" });
+            console.log("▶ [서버 RAM] 현재 메모리에 저장된 데이터를 보냅니다.");
+            return res.status(200).json({ payload: ramStorage });
         } 
         
-        // 📤 [POST 요청]: 데이터 저장하기
+        // 📤 [POST 요청]: 프론트엔드가 데이터를 보냈을 때 (Cloud Save)
         if (req.method === 'POST') {
             const { payload } = req.body;
-            if (!payload) {
-                return res.status(400).json({ error: '저장할 내용(payload)이 없습니다.' });
-            }
-
-            // Redis에 데이터 저장
-            await client.set(STORAGE_KEY, payload);
-            console.log("✅ [서버] Redis에 데이터 저장 성공!");
+            
+            // 데이터가 없더라도 빈 값("")을 허용하도록 설정
+            ramStorage = payload !== undefined ? payload : "";
+            
+            console.log("✅ [서버 RAM] 프론트엔드로부터 받은 데이터를 RAM에 임시 저장했습니다!");
             return res.status(200).json({ success: true });
         }
 
         return res.status(405).json({ error: '허용되지 않는 메서드입니다.' });
 
     } catch (error) {
-        console.error("❌ Redis 통신 중 서버 에러 발생:", error);
-        return res.status(500).json({ error: '서버 내부 오류가 발생했습니다.', details: error.message });
+        console.error("❌ 서버 내부 에러 발생:", error);
+        return res.status(500).json({ error: '서버 오류 발생', details: error.message });
     }
 }
