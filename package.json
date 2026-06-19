@@ -1,10 +1,10 @@
 {
   "name": "max-planner-backend",
-  "version": "1.0.2",
-  "description": "Max Planner Protected Backend",
+  "version": "1.0.4",
+  "description": "Max Planner Pure Redis RAM-First Backend",
   "main": "api/planner.js",
   "dependencies": {
-    "@upstash/redis": "^1.28.4"
+    "redis": "^4.7.0"
   },
   "engines": {
     "node": ">=18.0.0"
