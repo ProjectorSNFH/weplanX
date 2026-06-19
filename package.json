@@ -1,9 +1,11 @@
 {
   "name": "max-planner-backend",
-  "version": "1.0.0",
-  "description": "Max Planner Transient RAM Backend",
+  "version": "1.0.2",
+  "description": "Max Planner Protected Backend",
   "main": "api/planner.js",
-  "dependencies": {},
+  "dependencies": {
+    "@upstash/redis": "^1.28.4"
+  },
   "engines": {
     "node": ">=18.0.0"
   }
