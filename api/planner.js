@@ -1,11 +1,44 @@
 import { createClient } from 'redis';
+import crypto from 'crypto';
 
 const client = createClient({ url: process.env.REDIS_URL || process.env.KV_URL });
 client.on('error', (err) => console.error('Redis Error', err));
 
 const CRYPTO_KEY = "MAX_PLANNER_SECRET_TOKEN_2026";
 
-// 식별용 UUID만 해독하는 함수
+// 🔐 스토리지(Redis) 전용 강력한 AES-256 키 및 IV 설정 생성
+const AES_KEY = crypto.createHash('sha256').update(CRYPTO_KEY).digest(); // 32바이트 키 유도
+const IV_LENGTH = 16;
+
+// [스토리지용] 강력한 AES-256-CBC 암호화 함수
+function encryptAES(text) {
+    if (!text) return "";
+    const iv = crypto.randomBytes(IV_LENGTH);
+    const cipher = crypto.createCipheriv('aes-256-cbc', AES_KEY, iv);
+    let encrypted = cipher.update(text, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    // IV와 암호문을 결합하여 저장
+    return iv.toString('hex') + ':' + encrypted;
+}
+
+// [스토리지용] AES-256-CBC 복호화 함수 (RAM으로 복구할 때 사용)
+function decryptAES(text) {
+    try {
+        if (!text) return "";
+        const parts = text.split(':');
+        const iv = Buffer.from(parts.shift(), 'hex');
+        const encryptedText = Buffer.from(parts.join(':'), 'hex');
+        const decipher = crypto.createDecipheriv('aes-256-cbc', AES_KEY, iv);
+        let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        return decrypted;
+    } catch (e) {
+        console.error("AES Decryption Error", e);
+        return "";
+    }
+}
+
+// 식별용 UUID만 해독하는 함수 (XOR)
 function decryptUUID(cipher) {
     try {
         let decoded = decodeURIComponent(Buffer.from(cipher, 'base64').toString('utf8'));
@@ -31,7 +64,9 @@ async function ensureRamLoaded(uuid) {
         loadPromises[uuid] = (async () => {
             if (!client.isOpen) await client.connect();
             const savedData = await client.get(`user:data:${uuid}`);
-            ramStorage[uuid] = savedData || ""; // 암호화된 문자열 그대로 유지
+            
+            // 💡 영구 저장소에서 가져온 대용량 AES 암호문을 해독하여 RAM에는 가벼운 XOR 암호문 상태로 적재합니다.
+            ramStorage[uuid] = savedData ? decryptAES(savedData) : ""; 
             isLoaded[uuid] = true;
         })();
     }
@@ -57,7 +92,7 @@ export default async function handler(req, res) {
             if(!uuid) return res.status(400).json({ error: '식별 오류' });
 
             await ensureRamLoaded(uuid);
-            // 암호화된 플래너 데이터 그대로 반환
+            // 프론트엔드가 해독할 수 있도록 RAM에 있던 XOR 암호화 레이어 그대로 반환
             return res.status(200).json({ payload: ramStorage[uuid] });
         } 
         
@@ -68,7 +103,7 @@ export default async function handler(req, res) {
 
             await ensureRamLoaded(uuid);
             
-            // 암호화된 데이터 통째로 RAM 적재
+            // 프론트엔드가 보낸 XOR 암호화 데이터 통째로 RAM 적재
             ramStorage[uuid] = payload || "";
 
             const now = Date.now();
@@ -76,8 +111,10 @@ export default async function handler(req, res) {
             if (now - lastSave >= SAVE_INTERVAL) {
                 lastSaveTimes[uuid] = now;
                 if (!client.isOpen) await client.connect();
-                // 백그라운드 덤프
-                client.set(`user:data:${uuid}`, ramStorage[uuid]).catch(e => console.error(e));
+                
+                // 💡 [보안 강화] 스토리지에 백그라운드 덤프를 뜰 때는 훨씬 강력한 AES-256-CBC로 2차 암호화하여 커밋합니다.
+                const strongEncryptedData = encryptAES(ramStorage[uuid]);
+                client.set(`user:data:${uuid}`, strongEncryptedData).catch(e => console.error(e));
             }
             return res.status(200).json({ success: true });
         }
