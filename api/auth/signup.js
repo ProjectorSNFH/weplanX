@@ -2,14 +2,11 @@ import { createClient } from 'redis';
 import crypto from 'crypto';
 
 const client = createClient({ url: process.env.REDIS_URL || process.env.KV_URL });
-client.on('error', (err) => console.error('Redis Error', err));
+client.on('error', (err) => console.error('❌ [SIGNUP] Redis Error:', err));
 
 const CRYPTO_KEY = "MAX_PLANNER_SECRET_TOKEN_2026";
-
-// 🧠 회원가입 임시 RAM 캐시 스토리지
 let authRamStorage = {};
 
-// 프론트엔드와 동일한 대칭키 복호화 알고리즘 (XOR)
 function decrypt(cipher) {
     try {
         let decoded = decodeURIComponent(Buffer.from(cipher, 'base64').toString('utf8'));
@@ -19,7 +16,10 @@ function decrypt(cipher) {
             result += String.fromCharCode(charCode);
         }
         return result;
-    } catch(e) { return ""; }
+    } catch(e) { 
+        console.error("❌ [SIGNUP] Payload Decrypt Error:", e.message);
+        return ""; 
+    }
 }
 
 export default async function handler(req, res) {
@@ -32,46 +32,58 @@ export default async function handler(req, res) {
     ); 
 
     if (req.method === 'OPTIONS') return res.status(200).end();
-    if (req.headers['x-app-verification'] !== 'MaxPlannerMaster2026') return res.status(401).json({ error: '인증 거부' });
+    if (req.headers['x-app-verification'] !== 'MaxPlannerMaster2026') {
+        console.warn("⚠️ [SIGNUP] 앱 인증 헤더 불일치 거부");
+        return res.status(401).json({ error: '인증 거부' });
+    }
 
     try {
         const { payload } = req.body;
+        console.log("📥 [SIGNUP] 회원가입 요청 수신");
+
         const decryptedStr = decrypt(payload);
         if (!decryptedStr) return res.status(400).json({ error: '잘못된 데이터 형식' });
 
         const { name, id, pw } = JSON.parse(decryptedStr);
+        console.log(`🔍 [SIGNUP] 검증 시작 - ID: ${id}, Name: ${name}`);
 
-        // 서버단 2차 유효성 검증
         if (!name || name.length > 10) return res.status(400).json({ error: '사용자명 오류' });
         if (!id || id.length < 4) return res.status(400).json({ error: '아이디 오류' });
         if (!pw || pw.length < 8) return res.status(400).json({ error: '비밀번호 오류' });
 
-        // 1. RAM 캐시에서 먼저 중복 확인 후, 없으면 Redis 조회
+        // 1. RAM 캐시 중복 확인
         if (authRamStorage[id]) {
+            console.warn(`⚠️ [SIGNUP] 가입 중복 거부 (RAM 캐시 적중) - ID: ${id}`);
             return res.status(400).json({ error: 'duplicate', message: '이미 사용 중인 아이디입니다.' });
         }
 
+        // Redis 연결 및 실제 조회
         if (!client.isOpen) await client.connect();
         const existing = await client.get(`user:auth:${id}`);
         if (existing) {
+            console.warn(`⚠️ [SIGNUP] 가입 중복 거부 (Redis 스토리지 적중) - ID: ${id}`);
             return res.status(400).json({ error: 'duplicate', message: '이미 사용 중인 아이디입니다.' });
         }
 
-        // 고유 식별 코드(UUID) 및 계정 정보 생성
+        // UUID 및 비밀번호 해싱
         const uuid = crypto.randomUUID();
         const hashedPassword = crypto.createHash('sha256').update(pw).digest('hex');
         const userData = { uuid, password: hashedPassword, name };
 
-        // 2. [RAM 우선 적재] 메모리에 먼저 계정 정보 보관
+        // 2. RAM 캐시 우선 적재
         authRamStorage[id] = userData;
+        console.log(`⚡ [SIGNUP] RAM 캐시 적재 완료 - ID: ${id}, UUID: ${uuid}`);
 
-        // 3. [비동기 스토리지 커밋] Redis 저장은 백그라운드에서 진행 (await 제거)
+        // 3. 비동기 백그라운드 스토리지 커밋
         client.set(`user:auth:${id}`, JSON.stringify(userData))
-            .catch(e => console.error("Redis Auth Commit Error:", e));
+            .then(() => console.log(`💾 [SIGNUP] 백그라운드 Redis Commit 완료 - ID: ${id}`))
+            .catch(e => console.error(`❌ [SIGNUP] Redis Commit 실패 - ID: ${id}:`, e));
 
-        // 4. 프론트엔드에게 즉시 완료 응답 반환
+        // 4. 프론트엔드 응답
+        console.log(`✅ [SIGNUP] 가입 처리 완료 응답 전송 - ID: ${id}`);
         return res.status(200).json({ success: true });
     } catch (error) {
+        console.error("❌ [SIGNUP] 서버 내부 오류 발생:", error);
         return res.status(500).json({ error: '서버 오류' });
     }
 }
