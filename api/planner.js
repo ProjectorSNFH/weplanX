@@ -2,26 +2,29 @@ import { createClient } from 'redis';
 import crypto from 'crypto';
 
 const client = createClient({ url: process.env.REDIS_URL || process.env.KV_URL });
-client.on('error', (err) => console.error('Redis Error', err));
+client.on('error', (err) => console.error('❌ [PLANNER] Redis Error:', err));
 
 const CRYPTO_KEY = "MAX_PLANNER_SECRET_TOKEN_2026";
-
-// 🔐 스토리지(Redis) 전용 강력한 AES-256 키 및 IV 설정 생성
-const AES_KEY = crypto.createHash('sha256').update(CRYPTO_KEY).digest(); // 32바이트 키 유도
+const AES_KEY = crypto.createHash('sha256').update(CRYPTO_KEY).digest(); 
 const IV_LENGTH = 16;
 
-// [스토리지용] 강력한 AES-256-CBC 암호화 함수
+let ramStorage = {}; 
+let isLoaded = {};
+let loadPromises = {};
+let lastSaveTimes = {};
+const SAVE_INTERVAL = 30000;
+
+// AES-256 암호화 (Redis 백업용)
 function encryptAES(text) {
     if (!text) return "";
     const iv = crypto.randomBytes(IV_LENGTH);
     const cipher = crypto.createCipheriv('aes-256-cbc', AES_KEY, iv);
     let encrypted = cipher.update(text, 'utf8', 'hex');
     encrypted += cipher.final('hex');
-    // IV와 암호문을 결합하여 저장
     return iv.toString('hex') + ':' + encrypted;
 }
 
-// [스토리지용] AES-256-CBC 복호화 함수 (RAM으로 복구할 때 사용)
+// AES-256 복호화 (Redis 로드용)
 function decryptAES(text) {
     try {
         if (!text) return "";
@@ -33,12 +36,11 @@ function decryptAES(text) {
         decrypted += decipher.final('utf8');
         return decrypted;
     } catch (e) {
-        console.error("AES Decryption Error", e);
+        console.error("❌ [PLANNER] AES Decryption Error:", e.message);
         return "";
     }
 }
 
-// 식별용 UUID만 해독하는 함수 (XOR)
 function decryptUUID(cipher) {
     try {
         let decoded = decodeURIComponent(Buffer.from(cipher, 'base64').toString('utf8'));
@@ -48,26 +50,27 @@ function decryptUUID(cipher) {
             result += String.fromCharCode(charCode);
         }
         return result;
-    } catch(e) { return ""; }
+    } catch(e) { 
+        console.error("❌ [PLANNER] UUID Decrypt Error:", e.message);
+        return ""; 
+    }
 }
 
-// 🧠 하이브리드 RAM 캐시
-let ramStorage = {}; 
-let isLoaded = {};
-let loadPromises = {};
-let lastSaveTimes = {};
-const SAVE_INTERVAL = 30000;
-
 async function ensureRamLoaded(uuid) {
-    if (isLoaded[uuid]) return;
+    if (isLoaded[uuid]) {
+        console.log(`🎯 [PLANNER] RAM Cache Hit! - UUID: ${uuid}`);
+        return;
+    }
     if (!loadPromises[uuid]) {
         loadPromises[uuid] = (async () => {
+            console.log(`🔄 [PLANNER] RAM Cache Miss. Redis에서 로드 시작 - UUID: ${uuid}`);
             if (!client.isOpen) await client.connect();
             const savedData = await client.get(`user:data:${uuid}`);
             
-            // 💡 영구 저장소에서 가져온 대용량 AES 암호문을 해독하여 RAM에는 가벼운 XOR 암호문 상태로 적재합니다.
+            // Redis 고강도 AES 데이터를 복호화하여 가벼운 RAM 스토리지 구조로 복구
             ramStorage[uuid] = savedData ? decryptAES(savedData) : ""; 
             isLoaded[uuid] = true;
+            console.log(`📦 [PLANNER] Redis 데이터 로드 및 AES 복호화 완료 - UUID: ${uuid}`);
         })();
     }
     await loadPromises[uuid];
@@ -83,7 +86,10 @@ export default async function handler(req, res) {
     ); 
     
     if (req.method === 'OPTIONS') return res.status(200).end();
-    if (req.headers['x-app-verification'] !== 'MaxPlannerMaster2026') return res.status(401).json({ error: '인증 거부' });
+    if (req.headers['x-app-verification'] !== 'MaxPlannerMaster2026') {
+        console.warn("⚠️ [PLANNER] 앱 인증 헤더 불일치 거부");
+        return res.status(401).json({ error: '인증 거부' });
+    }
 
     try {
         if (req.method === 'GET') {
@@ -92,7 +98,7 @@ export default async function handler(req, res) {
             if(!uuid) return res.status(400).json({ error: '식별 오류' });
 
             await ensureRamLoaded(uuid);
-            // 프론트엔드가 해독할 수 있도록 RAM에 있던 XOR 암호화 레이어 그대로 반환
+            console.log(`📤 [PLANNER] GET 응답 전송 (XOR 페이로드 데이터 포함) - UUID: ${uuid}`);
             return res.status(200).json({ payload: ramStorage[uuid] });
         } 
         
@@ -103,24 +109,33 @@ export default async function handler(req, res) {
 
             await ensureRamLoaded(uuid);
             
-            // 프론트엔드가 보낸 XOR 암호화 데이터 통째로 RAM 적재
+            // 즉시 가벼운 XOR 암호화 데이터를 RAM 적재
             ramStorage[uuid] = payload || "";
+            console.log(`⚡ [PLANNER] 실시간 변경 데이터 RAM 적재 완료 - UUID: ${uuid}`);
 
+            // 30초 주기 타이머 체크하여 Redis에 저장
             const now = Date.now();
             const lastSave = lastSaveTimes[uuid] || 0;
             if (now - lastSave >= SAVE_INTERVAL) {
                 lastSaveTimes[uuid] = now;
+                console.log(`⏳ [PLANNER] 30초 주기 도달 -> Redis 백그라운드 덤프 예약 시작 - UUID: ${uuid}`);
+                
                 if (!client.isOpen) await client.connect();
                 
-                // 💡 [보안 강화] 스토리지에 백그라운드 덤프를 뜰 때는 훨씬 강력한 AES-256-CBC로 2차 암호화하여 커밋합니다.
+                // 스토리지용 AES-256 강력 암호화 포장 후 비동기 저장
                 const strongEncryptedData = encryptAES(ramStorage[uuid]);
-                client.set(`user:data:${uuid}`, strongEncryptedData).catch(e => console.error(e));
+                client.set(`user:data:${uuid}`, strongEncryptedData)
+                    .then(() => console.log(`💾 [PLANNER] AES-256 암호화 및 Redis 백그라운드 덤프 완료! - UUID: ${uuid}`))
+                    .catch(e => console.error(`❌ [PLANNER] Redis 덤프 실패 - UUID: ${uuid}:`, e));
+            } else {
+                console.log(`⏱️ [PLANNER] 덤프 주기 미도달 (다음 덤프까지 대기) - 경과: ${Math.floor((now - lastSave)/1000)}초 / 30초`);
             }
             return res.status(200).json({ success: true });
         }
 
         return res.status(405).json({ error: '메서드 오류' });
     } catch (error) {
+        console.error("❌ [PLANNER] 서버 내부 오류 발생:", error);
         return res.status(500).json({ error: '서버 내부 오류' });
     }
 }
